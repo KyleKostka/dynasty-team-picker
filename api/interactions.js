@@ -812,7 +812,15 @@ async function handleTeamPick(res, body) {
         const who = holder.first_name || holder.username || "another coach";
         return ephemeral(res, { content: `🔒 **${label}** is already **${who}**'s team — pick a different school.` });
       }
-      // one team per coach: drop any other team role they currently hold
+      const prefill = await getCoachPrefill(userId);
+      // one team per coach: drop their previous team role — even if it's in a different conference dropdown
+      if (prefill.team && prefill.team.toLowerCase() !== label.toLowerCase()) {
+        const rr = await fetch(`${DISCORD}/guilds/${GUILD_ID}/roles`, { headers: { Authorization: `Bot ${BOT_TOKEN}` } });
+        const allRoles = rr.ok ? await rr.json() : [];
+        const oldRole = allRoles.find((x) => (x.name || "").toLowerCase() === prefill.team.toLowerCase());
+        if (oldRole) await roleEdit(userId, oldRole.id, "DELETE", "Team switch");
+      }
+      // also drop any same-dropdown team role they hold (cheap backup)
       for (const rid of have) {
         if (teamRoleIds.has(rid) && rid !== added) await roleEdit(userId, rid, "DELETE", "Team switch");
       }
@@ -825,7 +833,6 @@ async function handleTeamPick(res, body) {
         body: JSON.stringify({ user_id: userId, username, team: label, active: true }),
       });
       // first-timers get the contact form
-      const prefill = await getCoachPrefill(userId);
       if (!prefill.first_name) { prefill.team = label; return sendModal(res, prefill); }
       return ephemeral(res, { content: `✅ You're now coaching **${label}**.` });
     }
