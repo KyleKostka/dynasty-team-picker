@@ -10,6 +10,7 @@ const SB_KEY = process.env.SUPABASE_SERVICE_KEY;
 const ADVANCE_CHANNEL_ID = process.env.ADVANCE_CHANNEL_ID || "1512576539181449316";
 const CONTACT_CHANNEL_ID = process.env.CONTACT_CHANNEL_ID || "1262125864938901557";
 const LEAGUE_CHAT_ID = process.env.LEAGUE_CHAT_ID || "1257724499562856552";
+const ACTIVE_COACH_ROLE_ID = process.env.ACTIVE_COACH_ROLE_ID || "1512650144401719376";
 const MIN_COACHES_FOR_AUTO = 2; // don't auto-advance during setup
 
 // ---- season calendar (CFB 26 dynasty) ----
@@ -361,6 +362,33 @@ async function cmdMyteam(res, body) {
   return ephemeral(res, { content: team ? `Your team: **${team}**` : "You haven't picked a team yet — use the team-picker dropdowns." });
 }
 
+// /teams — show which schools are claimed and by whom.
+async function cmdTeams(res, body) {
+  const r = await sb("dyn_coaches?active=eq.true&team=not.is.null&select=username,first_name,team&order=team.asc");
+  const rows = r.ok ? await r.json() : [];
+  if (!rows.length) return ephemeral(res, { content: "No teams claimed yet — grab a school in the team-picker dropdowns." });
+  const lines = rows.map((c) => `**${c.team}** — ${c.first_name || c.username}`);
+  return ephemeral(res, { content: `🏈 **Teams claimed (${rows.length})**\n${lines.join("\n")}\n\n_Any school not listed is open — claim one in the team-picker._` });
+}
+
+// /freeteam — (Commissioner) release a coach's team so it's open again.
+async function cmdFreeTeam(res, body) {
+  if (!(await isCommish(body))) return ephemeral(res, { content: "🔒 Commissioners only." });
+  const team = (body.data.options || []).find((o) => o.name === "team")?.value?.trim();
+  if (!team) return ephemeral(res, { content: "Which team should I free?" });
+  const r = await sb("dyn_coaches?active=eq.true&team=not.is.null&select=user_id,username,first_name,team");
+  const rows = r.ok ? await r.json() : [];
+  const holder = rows.find((x) => (x.team || "").toLowerCase() === team.toLowerCase());
+  if (!holder) return ephemeral(res, { content: `No one is holding **${team}** right now.` });
+  // remove the matching school role from them
+  const rolesR = await fetch(`${DISCORD}/guilds/${GUILD_ID}/roles`, { headers: { Authorization: `Bot ${BOT_TOKEN}` } });
+  const roles = rolesR.ok ? await rolesR.json() : [];
+  const role = roles.find((x) => (x.name || "").toLowerCase() === (holder.team || "").toLowerCase());
+  if (role) await roleEdit(holder.user_id, role.id, "DELETE", "Commish freed team");
+  await sb(`dyn_coaches?user_id=eq.${holder.user_id}`, { method: "PATCH", body: JSON.stringify({ team: null }) });
+  return ephemeral(res, { content: `🆓 Freed **${holder.team}** (was ${holder.first_name || holder.username}) — it's open again.` });
+}
+
 // /away — toggle your away status (skipped on the board + auto-advance; auto-clears when you check in).
 async function cmdAway(res, body) {
   const u = userOf(body);
@@ -396,6 +424,7 @@ async function cmdHelp(res, body) {
     "**/done** — mark yourself played for the current week",
     "**/status** — see who's checked in this week",
     "**/myteam** — show your team",
+    "**/teams** — see which schools are taken and who's open",
     "**/setinfo** — set up / update your contact info",
     "**/schedule** `@opponent` `times` — propose game times; they lock one in",
     "**/away** — toggle your away status",
@@ -413,6 +442,7 @@ async function cmdHelp(res, body) {
     "**/reset-season** — restart the season at Week 1 (wipes history)",
     "**/undo** `@coach` — undo a coach's status this week",
     "**/offseason** — jump to the offseason phase",
+    "**/freeteam** `team` — release a coach's team so it's open again",
     "**/contacts** — post the live contact list",
     "**/contactcard** — post the contact-setup button",
   ];
@@ -747,44 +777,66 @@ async function handleAdvDone(res, body) {
 }
 
 // ---------- team picker (select menu) ----------
+const roleEdit = (userId, roleId, method, reason) =>
+  fetch(`${DISCORD}/guilds/${GUILD_ID}/members/${userId}/roles/${roleId}`, { method, headers: { Authorization: `Bot ${BOT_TOKEN}`, "X-Audit-Log-Reason": reason } });
+
+// Which active coach (if any) already holds this team — enforces one coach per team.
+async function teamHolder(label, exceptUserId) {
+  const r = await sb("dyn_coaches?active=eq.true&team=not.is.null&select=user_id,username,first_name,team");
+  const rows = r.ok ? await r.json() : [];
+  return rows.find((x) => (x.team || "").toLowerCase() === label.toLowerCase() && x.user_id !== exceptUserId) || null;
+}
+
 async function handleTeamPick(res, body) {
   const userId = body.member?.user?.id;
-  let addedLabel = null;
+  const username = nameOf(body.member?.user || {});
+  const have = new Set(body.member?.roles || []);
+  const values = body.data?.values || [];
+  // map every team role in this dropdown -> its label
+  const optLabel = {};
+  for (const row of body.message?.components || [])
+    for (const c of row.components || [])
+      if (c.type === 3) for (const o of c.options || []) optLabel[o.value] = o.label;
+  const teamRoleIds = new Set(Object.keys(optLabel));
+  const keepMenu = () => res.status(200).json({ type: 7, data: { content: body.message.content, components: body.message.components } });
+
   try {
-    const username = nameOf(body.member?.user || {});
-    const have = new Set(body.member?.roles || []);
-    const values = body.data?.values || [];
-    const labelFor = (val) => {
-      for (const row of body.message?.components || [])
-        for (const c of row.components || [])
-          if (c.type === 3) for (const o of c.options || []) if (o.value === val) return o.label;
-      return null;
-    };
-    for (const roleId of values) {
-      const had = have.has(roleId);
-      await fetch(`${DISCORD}/guilds/${GUILD_ID}/members/${userId}/roles/${roleId}`, {
-        method: had ? "DELETE" : "PUT",
-        headers: { Authorization: `Bot ${BOT_TOKEN}`, "X-Audit-Log-Reason": "Team picker" },
-      });
-      if (!had) {
-        addedLabel = labelFor(roleId) || addedLabel;
-        await sb("dyn_coaches?on_conflict=user_id", {
-          method: "POST",
-          headers: { Prefer: "resolution=merge-duplicates" },
-          body: JSON.stringify({ user_id: userId, username, team: labelFor(roleId) || roleId, active: true }),
-        });
+    const added = values.find((v) => !have.has(v));   // a new team being claimed
+    const dropped = values.find((v) => have.has(v));  // re-selecting your current team = give it up
+
+    if (added) {
+      const label = optLabel[added] || added;
+      // one coach per team: refuse if someone else already has it
+      const holder = await teamHolder(label, userId);
+      if (holder) {
+        const who = holder.first_name || holder.username || "another coach";
+        return ephemeral(res, { content: `🔒 **${label}** is already **${who}**'s team — pick a different school.` });
       }
+      // one team per coach: drop any other team role they currently hold
+      for (const rid of have) {
+        if (teamRoleIds.has(rid) && rid !== added) await roleEdit(userId, rid, "DELETE", "Team switch");
+      }
+      // assign the new team + (best-effort) the Active-Coach role
+      await roleEdit(userId, added, "PUT", "Team picker");
+      if (!have.has(ACTIVE_COACH_ROLE_ID)) await roleEdit(userId, ACTIVE_COACH_ROLE_ID, "PUT", "Active-Coach on team pick");
+      await sb("dyn_coaches?on_conflict=user_id", {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates" },
+        body: JSON.stringify({ user_id: userId, username, team: label, active: true }),
+      });
+      // first-timers get the contact form
+      const prefill = await getCoachPrefill(userId);
+      if (!prefill.first_name) { prefill.team = label; return sendModal(res, prefill); }
+      return ephemeral(res, { content: `✅ You're now coaching **${label}**.` });
+    }
+
+    if (dropped) {
+      await roleEdit(userId, dropped, "DELETE", "Team given up");
+      await sb(`dyn_coaches?user_id=eq.${userId}`, { method: "PATCH", body: JSON.stringify({ team: null }) });
+      return ephemeral(res, { content: `You've given up **${optLabel[dropped] || "your team"}** — it's open again.` });
     }
   } catch { /* fall through */ }
-  // First time a coach picks a team, pop the contact form (prefilled with their team).
-  if (addedLabel && userId) {
-    const prefill = await getCoachPrefill(userId);
-    if (!prefill.first_name) {
-      prefill.team = prefill.team || addedLabel;
-      return sendModal(res, prefill);
-    }
-  }
-  return res.status(200).json({ type: 7, data: { content: body.message.content, components: body.message.components } });
+  return keepMenu();
 }
 
 // ---------- entrypoint ----------
@@ -809,6 +861,8 @@ export default async function handler(req, res) {
       if (name === "done") return await cmdDone(res, body);
       if (name === "status") return await cmdStatus(res, body);
       if (name === "myteam") return await cmdMyteam(res, body);
+      if (name === "teams") return await cmdTeams(res, body);
+      if (name === "freeteam") return await cmdFreeTeam(res, body);
       if (name === "board") return await cmdBoard(res, body);
       if (name === "sim") return await cmdSimOrForce(res, body, "sim", "Simmed");
       if (name === "forcew") return await cmdSimOrForce(res, body, "forcew", "Force-win for");

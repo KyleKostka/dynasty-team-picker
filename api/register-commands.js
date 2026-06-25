@@ -13,6 +13,7 @@ const COMMANDS = [
   { name: "done", description: "Mark yourself done (played) for the current week", type: 1 },
   { name: "status", description: "See the current advance status", type: 1 },
   { name: "myteam", description: "Show your current team", type: 1 },
+  { name: "teams", description: "See which schools are claimed and who's still open", type: 1 },
   { name: "board", description: "(Commissioner) Post the weekly advance board", type: 1 },
   { name: "sim", description: "(Commissioner) Mark a coach's game as simmed", type: 1, options: [{ name: "coach", description: "The coach", type: 6, required: true }] },
   { name: "forcew", description: "(Commissioner) Give a coach a force win", type: 1, options: [{ name: "coach", description: "The coach", type: 6, required: true }] },
@@ -25,6 +26,7 @@ const COMMANDS = [
   { name: "go-to-week", description: "(Commissioner) Jump to a stage # (1-14 reg, 15 conf, 16-20 playoff, 21-32 offseason)", type: 1, options: [{ name: "number", description: "Stage # (1-32)", type: 4, required: true }] },
   { name: "undo", description: "(Commissioner) Undo a coach's check-in / sim / force-win this week", type: 1, options: [{ name: "coach", description: "The coach", type: 6, required: true }] },
   { name: "offseason", description: "(Commissioner) Kick off the offseason phase for the current season", type: 1 },
+  { name: "freeteam", description: "(Commissioner) Release a coach's team so it's open again", type: 1, options: [{ name: "team", description: "Team name to free (e.g. Alabama)", type: 3, required: true }] },
 
   // --- self-service contact list ---
   { name: "setinfo", description: "Set up / update your contact info (name, gamertag, team, phone, timezone)", type: 1 },
